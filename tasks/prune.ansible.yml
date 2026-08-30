@@ -1,0 +1,112 @@
+---
+# tasks file for prune
+
+# Manual Cinder snapshots never expire on their own, so without this a
+# retention window is meaningless — enforced here, not in
+# tasks/assert.ansible.yml, so it's only checked on the run(s) that
+# actually prune.
+- name: Assert retention_days is positive
+  ansible.builtin.assert:
+    that:
+      - maintenance_openstack_snapshot_retention_days | int > 0
+    fail_msg: >-
+      maintenance_openstack_snapshot_retention_days
+      ({{ maintenance_openstack_snapshot_retention_days }}) must be greater
+      than 0. Manual Cinder snapshots never expire on their own, so a
+      non-positive retention window is nonsensical here.
+    success_msg: "maintenance_openstack_snapshot_retention_days is positive."
+
+# Listing mechanism: project-wide (no name:/volume: filter), filtered
+# client-side below — not one openstack.cloud.volume_snapshot_info call
+# per volume. Chosen deliberately: pruning must work standalone (run_prune
+# true with run_backup false, on a host that never re-resolves its
+# server's attached volumes this run), and this role's naming scheme
+# already encodes everything needed to scope the filter safely — the name
+# prefix plus this host's own inventory_hostname_short — without needing
+# to know which volumes are attached right now. The tradeoff is one full
+# project-listing call per targeted host in a multi-host play rather than
+# one shared call; accepted for the self-containment.
+#
+# Not run_once for the same reason: the client-side filter below is
+# already scoped to THIS host's own name pattern, so there is no
+# cross-host race to protect against the way maintenance_oci_backup's
+# compartment-wide (not per-host) prune has to guard with run_once.
+- name: List all volume snapshots visible to this auth
+  openstack.cloud.volume_snapshot_info:
+    auth: "{{ maintenance_openstack_snapshot_auth }}"
+    region_name: "{{ maintenance_openstack_snapshot_region_name | default(omit) }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  register: maintenance_openstack_snapshot_snapshot_list
+  ignore_errors: "{{ ansible_check_mode }}"
+
+# Same now(utc=true) reasoning as tasks/backup.ansible.yml's date stamp:
+# evaluated by the controller at template-render time, independent of
+# delegate_to and of whatever facts (if any) inventory_hostname happens to
+# have gathered. Rendered once as a naive-but-true-UTC datetime (format it
+# to a string and reparse it) so it can be subtracted directly from each
+# snapshot's created_at below without either side's epoch/timestamp()
+# conversion picking up the controller's local timezone — to_datetime()
+# and datetime.timestamp() on a naive value both assume local time, which
+# would otherwise skew the retention cutoff by the controller's UTC
+# offset.
+- name: Determine the current UTC time for age comparison
+  ansible.builtin.set_fact:
+    maintenance_openstack_snapshot_now_utc: >-
+      {{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%S') | to_datetime('%Y-%m-%dT%H:%M:%S') }}
+
+# Cinder's created_at has been observed with and without a fractional-
+# second suffix across API/microversions; splitting off anything from the
+# first '.' onward before parsing means only the fixed
+# YYYY-MM-DDTHH:MM:SS portion is ever handed to to_datetime, regardless of
+# whether the API included fractional seconds. Confirmed against the
+# installed openstacksdk 4.13.0 resource definition
+# (openstack/block_storage/v3/snapshot.py): created_at is a plain
+# resource.Body with no type/format conversion applied, so it is passed
+# through exactly as the API returned it.
+#
+# Scoped to THIS role's own objects two ways at once: the name prefix
+# (maint-*) and this host (<prefix>-<host>-), so a prune run on one host
+# can never touch a snapshot belonging to another host even though the
+# list call above is project-wide, not host- or volume-scoped.
+- name: Filter to this role's own snapshots past retention
+  ansible.builtin.set_fact:
+    maintenance_openstack_snapshot_expired: >-
+      {%- set result = [] -%}
+      {%- set host_prefix = maintenance_openstack_snapshot_name_prefix + '-' + inventory_hostname_short + '-' -%}
+      {%- for snap in maintenance_openstack_snapshot_snapshot_list.volume_snapshots | default([]) -%}
+        {%- if snap.name is defined and snap.name.startswith(host_prefix) -%}
+          {%- set created_utc = snap.created_at.split('.')[0] | to_datetime('%Y-%m-%dT%H:%M:%S') -%}
+          {%- set age_days = (maintenance_openstack_snapshot_now_utc - created_utc).total_seconds() / 86400 -%}
+          {%- if age_days >= maintenance_openstack_snapshot_retention_days | int -%}
+            {%- set _ = result.append(snap) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+
+- name: Report snapshots that would be pruned (dry run)
+  ansible.builtin.debug:
+    msg: >-
+      [dry run] Would delete {{ maintenance_openstack_snapshot_expired | length }}
+      snapshot(s) on {{ inventory_hostname }}:
+      {{ maintenance_openstack_snapshot_expired | map(attribute='name') | list }}
+  when: maintenance_openstack_snapshot_prune_dry_run | bool
+
+- name: Delete expired snapshots
+  openstack.cloud.volume_snapshot:
+    name: "{{ item.name }}"
+    volume: "{{ item.volume_id }}"
+    state: absent
+    auth: "{{ maintenance_openstack_snapshot_auth }}"
+    region_name: "{{ maintenance_openstack_snapshot_region_name | default(omit) }}"
+  loop: "{{ maintenance_openstack_snapshot_expired }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: not (maintenance_openstack_snapshot_prune_dry_run | bool)
+  register: maintenance_openstack_snapshot_prune_result
+  ignore_errors: "{{ ansible_check_mode }}"

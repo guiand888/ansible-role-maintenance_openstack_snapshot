@@ -1,0 +1,41 @@
+---
+# tasks file for assert
+
+# Gated behind maintenance_openstack_snapshot_enable in tasks/main.yml,
+# alongside every other include here — required so tests/test.yml can
+# invoke the role with maintenance_openstack_snapshot_enable: false and no
+# credentials at all without this file failing the run for lack of them.
+
+- name: Assert OpenStack auth was provided
+  ansible.builtin.assert:
+    that:
+      - maintenance_openstack_snapshot_auth is defined
+      - maintenance_openstack_snapshot_auth is mapping
+      - maintenance_openstack_snapshot_auth | length > 0
+    fail_msg: >-
+      maintenance_openstack_snapshot_auth must be a non-empty dict
+      (auth_url, username, password, project_name, ...) — this role does
+      not fall back to ambient clouds.yaml or OS_* environment variables.
+      See the role README.
+    success_msg: "maintenance_openstack_snapshot_auth is set."
+
+# Only required on the backup path, and only when there is no explicit
+# volume_ids override to snapshot instead - discovery is the only thing
+# _server is used for (see tasks/backup.ansible.yml). Pruning never needs
+# it: it filters existing snapshots by name pattern and age, not by
+# re-resolving the server's attached volumes.
+- name: Assert a target server was provided when volume discovery is needed
+  ansible.builtin.assert:
+    that:
+      - maintenance_openstack_snapshot_server is defined
+      - maintenance_openstack_snapshot_server | length > 0
+    fail_msg: >-
+      maintenance_openstack_snapshot_run_backup is true and
+      maintenance_openstack_snapshot_volume_ids is empty, so
+      maintenance_openstack_snapshot_server must be set to the OpenStack
+      server (instance) name or ID whose attached volumes get discovered
+      and snapshotted — see the role README.
+    success_msg: "maintenance_openstack_snapshot_server is set."
+  when:
+    - maintenance_openstack_snapshot_run_backup | bool
+    - maintenance_openstack_snapshot_volume_ids | length == 0

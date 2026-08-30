@@ -1,0 +1,104 @@
+---
+# defaults file for maintenance_openstack_snapshot
+
+# Master switch. When false, this role does nothing at all — including the
+# required-variable assert (see tasks/main.yml and tasks/assert.ansible.yml).
+# That gating exists specifically so tests/test.yml can exercise the
+# dispatcher/lint gates with maintenance_openstack_snapshot_enable: false and
+# no OpenStack credentials at all.
+maintenance_openstack_snapshot_enable: true
+
+# Take a snapshot this run. On by default: this role's core purpose is
+# non-destructive (it only ever creates and reads snapshots when this is
+# the only switch flipped).
+maintenance_openstack_snapshot_run_backup: true
+
+# Prune old snapshots this run. Off by default — deletion is opt-in, never
+# a silent side effect of taking a snapshot.
+maintenance_openstack_snapshot_run_prune: false
+
+# Report what pruning WOULD delete without deleting it. On by default so an
+# operator flips maintenance_openstack_snapshot_run_prune on first with this
+# still true, reviews the report, and only then sets this false for a real
+# prune.
+maintenance_openstack_snapshot_prune_dry_run: true
+
+# --- Required on the backup path when volume_ids is empty ---
+
+# The OpenStack server (instance) name or ID whose attached volumes get
+# discovered and snapshotted, used only when maintenance_openstack_snapshot_volume_ids
+# is empty. Not needed for pruning (see tasks/prune.ansible.yml) or when
+# volume_ids already names the volumes explicitly.
+maintenance_openstack_snapshot_server: ""
+
+# --- Required whenever the role does anything (backup or prune) ---
+
+# Auth information as openstacksdk's password auth plugin expects it:
+# auth_url, username, password, project_name, and (if the cloud uses
+# domains) user_domain_name / project_domain_name. Passed straight through
+# to each module's auth: parameter.
+#
+# This is required and non-ambient on purpose. There is no clouds.yaml
+# anywhere in the consuming repo (no /etc/openstack/clouds.yaml, no
+# ~/.config/openstack/clouds.yaml), no OS_* environment variables are set
+# on the controller, and no existing task passes an explicit auth: or
+# cloud: parameter — the current mailcow_upgrade_openstack.yml snapshot
+# task depends on ambient state that does not appear to exist anywhere.
+# Rather than perpetuate that, this role takes an explicit vaulted dict,
+# the same way maintenance_oci_backup takes its OCI API key as explicit
+# vars instead of relying on ambient credentials. Expected to arrive
+# already vault-encrypted from the caller (e.g. ansible-gafr's
+# group_vars/fwdv_infra/vault.yml).
+maintenance_openstack_snapshot_auth: {}
+
+# Optional — passed through to each module's region_name:. Leave empty for
+# a single-region cloud.
+maintenance_openstack_snapshot_region_name: ""
+
+# --- Volume selection ---
+
+# Explicit list of volume IDs/names to snapshot. When empty (the default),
+# the role discovers every volume currently attached to
+# maintenance_openstack_snapshot_server via openstack.cloud.server_info's
+# attached_volumes field, and snapshots all of them.
+#
+# The current production playbook (mailcow_upgrade_openstack.yml)
+# hardcodes a single openstack_volume_id as a host_var — which is exactly
+# why any *other* volume attached to that same host has never been
+# covered by a maintenance snapshot. Discovering the full attached set by
+# default closes that gap; this list stays available for a caller who
+# wants to pin down or exclude a specific subset instead of relying on
+# discovery.
+maintenance_openstack_snapshot_volume_ids: []
+
+# --- Naming (see README "Naming") ---
+
+# Every object this role creates is named <prefix>-*, so pruning can be
+# scoped safely to only ever touch objects this role created.
+maintenance_openstack_snapshot_name_prefix: "maint"
+
+# --- Snapshot shape ---
+
+# force: true is required, not optional, for this role's actual use case:
+# every volume it targets is attached to a running instance (state
+# in-use) at snapshot time, and Cinder only allows snapshotting an in-use
+# volume when force is set. Per OpenStack's own Cinder admin docs, "the
+# backup of an in-use volume means your data is crash consistent" — this
+# snapshot is therefore crash-consistent, not application-consistent. The
+# maintenance_borgmatic_backup role runs alongside this one in the same P1
+# backup phase specifically to add an application-consistent layer on top
+# (database dump hooks); this role's snapshot is not meant to be the only
+# restore point.
+maintenance_openstack_snapshot_force: true
+
+# Manual snapshots never expire on their own, so this role deletes them
+# itself once they're older than this many days. Must be > 0 — enforced
+# by tasks/prune.ansible.yml.
+maintenance_openstack_snapshot_retention_days: 14
+
+# Wait for each snapshot to reach a terminal state before moving on, so a
+# facts-based assert downstream sees the true final state rather than a
+# still-creating snapshot. Passed straight through to the module's own
+# wait/timeout parameters.
+maintenance_openstack_snapshot_wait: true
+maintenance_openstack_snapshot_wait_timeout: 1800

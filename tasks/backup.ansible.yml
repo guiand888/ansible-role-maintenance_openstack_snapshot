@@ -1,0 +1,163 @@
+---
+# tasks file for backup
+
+# Every task in this file talks to the OpenStack API from the controller,
+# not the managed host — openstacksdk lives in the controller's Python
+# environment, not on the target. become: false throughout; no root is
+# ever needed for an API call. no_log: true on every task that carries
+# auth: as a parameter, so the vaulted dict never leaks into -v output,
+# registered-result dumps, or an error message.
+
+# Discovery mechanism: openstack.cloud.server_info, not
+# openstack.cloud.volume_info filtered by attachment/server.
+#
+# Verified directly against the installed openstack.cloud 2.6.0 collection
+# (matches this role's requirements.yml pin):
+# - server_info's own RETURN docs (plugins/modules/server_info.py) document
+#   an `attached_volumes` field on every returned server: "A list of an
+#   attached volumes. Each item in the list contains at least an 'id' key
+#   to identify the specific volumes." Returned unconditionally
+#   ("returned: success") — no `detailed: true` (extra API round-trip per
+#   server) needed.
+# - Confirmed in the underlying openstacksdk 4.13.0 resource definition
+#   (openstack/compute/v2/server.py): attached_volumes maps to the
+#   standard Nova response field os-extended-volumes:volumes_attached,
+#   present on the normal server GET/list response, not gated behind any
+#   extra call.
+# server_info gives the server -> attached-volumes relationship directly
+# in one call. volume_info has no equivalent "volumes attached to this
+# server" filter of its own — getting there via volume_info would mean
+# listing every volume in the project and filtering client-side on each
+# volume's own attachments list, for no benefit over reading it off the
+# server it's already attached to.
+- name: Resolve server details when discovering attached volumes
+  openstack.cloud.server_info:
+    name: "{{ maintenance_openstack_snapshot_server }}"
+    auth: "{{ maintenance_openstack_snapshot_auth }}"
+    region_name: "{{ maintenance_openstack_snapshot_region_name | default(omit) }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: maintenance_openstack_snapshot_volume_ids | length == 0
+  register: maintenance_openstack_snapshot_server_info
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Assert the target server resolved to exactly one server
+  ansible.builtin.assert:
+    that:
+      - maintenance_openstack_snapshot_server_info.servers | default([]) | length == 1
+    fail_msg: >-
+      Expected exactly one OpenStack server matching
+      maintenance_openstack_snapshot_server
+      ('{{ maintenance_openstack_snapshot_server }}'), found
+      {{ maintenance_openstack_snapshot_server_info.servers | default([]) | length }}.
+      A silently-shrunk (zero) or ambiguous (more than one) match must not
+      be treated as success.
+    success_msg: "Server resolved to exactly one match."
+  when:
+    - maintenance_openstack_snapshot_volume_ids | length == 0
+    - not ansible_check_mode
+
+# An explicit volume_ids override always wins over discovery — it exists
+# precisely so a caller can pin down or exclude a specific subset instead
+# of trusting whatever happens to be attached right now.
+- name: Build the list of volumes to snapshot
+  ansible.builtin.set_fact:
+    maintenance_openstack_snapshot_target_volume_ids: >-
+      {{ maintenance_openstack_snapshot_volume_ids
+         if maintenance_openstack_snapshot_volume_ids | length > 0
+         else (maintenance_openstack_snapshot_server_info.servers | default([{}]) | first
+               ).get('attached_volumes', []) | map(attribute='id') | list }}
+
+# A zero-result resolution (explicit override emptied out, or a server
+# with nothing attached) must fail loudly rather than silently reporting
+# success with zero snapshots taken — that would defeat the entire point
+# of this role as a backup gate.
+- name: Fail clearly when no volumes were resolved to snapshot
+  ansible.builtin.assert:
+    that:
+      - maintenance_openstack_snapshot_target_volume_ids | length > 0
+    fail_msg: >-
+      No volumes were resolved to snapshot. Either
+      maintenance_openstack_snapshot_volume_ids was empty and
+      maintenance_openstack_snapshot_server had no attached volumes, or
+      the explicit volume_ids override itself was empty.
+    success_msg: >-
+      {{ maintenance_openstack_snapshot_target_volume_ids | length }}
+      volume(s) resolved to snapshot.
+  when: not ansible_check_mode
+
+# Today's date. Deliberately NOT ansible_facts['date_time']: every task in
+# this file runs delegate_to: localhost, and with delegate_to,
+# `ansible_facts` in a template resolves against the current loop host's
+# (inventory_hostname's) own gathered facts, not the delegate's, unless
+# delegate_facts is set — so it would depend on facts having been gathered
+# for inventory_hostname in the calling play, for no actual benefit here.
+# Jinja's now() global is evaluated by the controller at template-render
+# time regardless of delegate_to or fact-gathering state, so it needs
+# nothing gathered anywhere and is exactly "today" where the snapshot is
+# actually being taken. utc=true keeps the stamp stable across
+# controller-local timezones.
+- name: Determine today's date stamp for snapshot naming
+  ansible.builtin.set_fact:
+    maintenance_openstack_snapshot_today: "{{ now(utc=true).strftime('%Y%m%d') }}"
+
+# name is deliberately <prefix>-<host>-<volume>-<date>, not
+# <prefix>-<host>-<date>: openstack.cloud.volume_snapshot resolves an
+# existing snapshot with find_snapshot(name) — by name ALONE, ignoring
+# which volume it belongs to (verified directly in the installed
+# openstack.cloud 2.6.0 source, plugins/modules/volume_snapshot.py:
+# `snapshot = self.conn.block_storage.find_snapshot(name)`). A host-only
+# naming scheme would make a second volume on the same host resolve to
+# the SAME name as the first volume's snapshot, so a rerun would report
+# changed: false and silently skip snapshotting it.
+- name: Create a snapshot of each resolved volume
+  openstack.cloud.volume_snapshot:
+    name: >-
+      {{ maintenance_openstack_snapshot_name_prefix }}-{{ inventory_hostname_short }}-{{
+      item }}-{{ maintenance_openstack_snapshot_today }}
+    volume: "{{ item }}"
+    # Every volume this role targets is attached to a running instance, so
+    # force is required for Cinder to allow the snapshot at all. See
+    # defaults/main.yml and the README for why that's an accepted
+    # crash-consistent (not application-consistent) restore point here.
+    force: "{{ maintenance_openstack_snapshot_force }}"
+    state: present
+    wait: "{{ maintenance_openstack_snapshot_wait }}"
+    timeout: "{{ maintenance_openstack_snapshot_wait_timeout }}"
+    auth: "{{ maintenance_openstack_snapshot_auth }}"
+    region_name: "{{ maintenance_openstack_snapshot_region_name | default(omit) }}"
+  loop: "{{ maintenance_openstack_snapshot_target_volume_ids }}"
+  loop_control:
+    label: "{{ item }}"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  register: maintenance_openstack_snapshot_create_result
+  ignore_errors: "{{ ansible_check_mode }}"
+
+# Exposed so a calling playbook can aggregate a fleet-wide "every host
+# produced a verified restore point, zero failures" gate assertion across
+# every maintenance_* role in the same run. Deliberately does not itself
+# assert success here — that fleet-wide gate belongs to the caller, which
+# is the only place that knows what "the whole fleet" means for a given
+# run.
+#
+# `| default(...)` throughout guards against --check: under check mode
+# the module's own run() returns only `changed` (confirmed in
+# plugins/modules/volume_snapshot.py — the check_mode branch calls
+# exit_json(changed=...) alone, with no volume_snapshot/name keys at all),
+# which would otherwise make this task fail on an undefined attribute
+# during a --check --diff dry run.
+- name: Build the aggregated snapshot result for this host
+  ansible.builtin.set_fact:
+    maintenance_openstack_snapshot_result: >-
+      {%- set result = [] -%}
+      {%- for r in maintenance_openstack_snapshot_create_result.results | default([]) -%}
+        {%- set _ = result.append({
+              'volume': r.item,
+              'snapshot_name': (r.volume_snapshot.name if (r.volume_snapshot is defined) else none),
+              'changed': r.changed | default(false),
+            }) -%}
+      {%- endfor -%}
+      {{ result }}

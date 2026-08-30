@@ -1,0 +1,42 @@
+---
+galaxy_info:
+  role_name: maintenance_openstack_snapshot
+  namespace: guiand888
+  author: Guillaume Andre
+  description: >-
+    Gate-quality OpenStack Cinder volume snapshot of every volume attached
+    to an instance, with opt-in, retention-based pruning of the snapshots
+    this role creates.
+  company: Forward Systems
+  issue_tracker_url: https://github.com/guiand888/ansible-role-maintenance_openstack_snapshot/issues
+  license: AGPL-3.0-only
+  min_ansible_version: "2.12"
+
+  platforms:
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+    - name: Fedora
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+        - noble
+
+  galaxy_tags:
+    - openstack
+    - cinder
+    - ovh
+    - cloud
+    - backup
+    - blockstorage
+    - sysadmin
+
+dependencies: []

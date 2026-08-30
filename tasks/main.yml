@@ -1,0 +1,18 @@
+---
+# tasks file for maintenance_openstack_snapshot
+
+- name: Assert required variables were provided
+  ansible.builtin.include_tasks: assert.ansible.yml
+  when: maintenance_openstack_snapshot_enable | bool
+
+- name: Discover and snapshot attached volumes
+  ansible.builtin.include_tasks: backup.ansible.yml
+  when:
+    - maintenance_openstack_snapshot_enable | bool
+    - maintenance_openstack_snapshot_run_backup | bool
+
+- name: Prune old snapshots
+  ansible.builtin.include_tasks: prune.ansible.yml
+  when:
+    - maintenance_openstack_snapshot_enable | bool
+    - maintenance_openstack_snapshot_run_prune | bool

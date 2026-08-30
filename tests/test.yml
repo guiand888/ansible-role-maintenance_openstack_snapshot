@@ -1,0 +1,9 @@
+---
+- name: Converge
+  hosts: localhost
+  connection: local
+  become: false
+  vars:
+    maintenance_openstack_snapshot_enable: false
+  roles:
+    - guiand888.maintenance_openstack_snapshot
