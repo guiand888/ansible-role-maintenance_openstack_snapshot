@@ -33,6 +33,7 @@ All required variables are enforced by `ansible.builtin.assert` in `tasks/assert
 | `maintenance_openstack_snapshot_run_prune` | `false` | Prune old snapshots this run. Opt-in — deletion is never a silent side effect of taking a snapshot. |
 | `maintenance_openstack_snapshot_prune_dry_run` | `true` | Report what pruning would delete without deleting it. |
 | `maintenance_openstack_snapshot_volume_ids` | `[]` | Explicit override list of volume name/ID strings. When non-empty, used as-is instead of discovering `maintenance_openstack_snapshot_server`'s attached volumes. |
+| `maintenance_openstack_snapshot_auth_type` | `"password"` | Which openstacksdk auth plugin `maintenance_openstack_snapshot_auth` is shaped for. Defaults to `"password"` — today's implicit behavior, kept for backward compatibility. Set to `"v3applicationcredential"` to select OpenStack Application Credential auth instead (see "Auth" below). Passed through to each module's `auth_type:` parameter — confirmed a genuine, independent module parameter on `openstack.cloud.volume_snapshot` and this collection's other modules, not nested inside `auth:`. |
 | `maintenance_openstack_snapshot_region_name` | `""` | Passed through to each module's `region_name:`. Leave empty for a single-region cloud. |
 | `maintenance_openstack_snapshot_name_prefix` | `"maint"` | Prefix for every object this role creates, so pruning can be scoped safely to only ever touch objects this role created. |
 | `maintenance_openstack_snapshot_force` | `true` | Passed to `openstack.cloud.volume_snapshot`'s `force:`. Required `true` for this role's actual use case — see "Force" below. |
@@ -61,6 +62,8 @@ Every task that needs "today" or "now" runs `delegate_to: localhost`. With `dele
 ### Auth
 
 There is no `clouds.yaml` (`/etc/openstack/clouds.yaml`, `~/.config/openstack/clouds.yaml`, or otherwise) anywhere in the consuming repo, no `OS_*` environment variables set on the controller, and the ad hoc task this role replaces passed no `auth:`/`cloud:` parameter at all — it silently depended on ambient controller state that does not appear to exist anywhere discoverable. Rather than perpetuate that, this role takes an explicit vaulted `auth:` dict, the same way `maintenance_oci_backup` takes its OCI API key as explicit vars instead of relying on ambient credentials.
+
+`maintenance_openstack_snapshot_auth_type` selects which openstacksdk auth plugin that `auth:` dict is shaped for, and defaults to `"password"` for backward compatibility with every caller written before this variable existed. Password auth needs `auth_url`, `username`, `password`, `project_name`/`project_id`, and `user_domain_name`/`project_domain_name` if the cloud uses domains. Setting `maintenance_openstack_snapshot_auth_type: v3applicationcredential` instead selects OpenStack Application Credential auth, which needs only `auth_url`, `application_credential_id`, and `application_credential_secret` in the `auth:` dict — no username, password, or project/domain scoping, because scoping is baked into the credential itself when it's created (OVH's Horizon: Identity → Application Credentials). A leaked application credential is individually revocable from Horizon without touching the account password, unlike password auth. `auth_type` is confirmed as a genuine, independent parameter on `openstack.cloud.volume_snapshot` (and this collection's other modules) in the installed `openstack.cloud` 2.6.0 argspec — it is not nested inside `auth:`, and not just a `clouds.yaml` concept.
 
 ### Force
 
@@ -92,6 +95,26 @@ There is no `clouds.yaml` (`/etc/openstack/clouds.yaml`, `~/.config/openstack/cl
         maintenance_openstack_snapshot_run_prune: true
         maintenance_openstack_snapshot_prune_dry_run: true
         maintenance_openstack_snapshot_auth: "{{ vault_openstack_auth }}"
+        maintenance_openstack_snapshot_region_name: "GRA9"
+```
+
+Application Credential auth instead of password auth — note `auth_type` and the smaller `auth:` dict shape (no `username`/`password`/`project_name`/domain fields, since scoping is implicit in the credential):
+
+```yaml
+- hosts: fwdv_infra
+  become: false
+  tasks:
+    - name: Snapshot every volume attached to this instance
+      ansible.builtin.include_role:
+        name: guiand888.maintenance_openstack_snapshot
+      vars:
+        maintenance_openstack_snapshot_run_backup: true
+        maintenance_openstack_snapshot_server: "{{ inventory_hostname }}"
+        maintenance_openstack_snapshot_auth_type: v3applicationcredential
+        maintenance_openstack_snapshot_auth:
+          auth_url: "{{ vault_openstack_auth_url }}"
+          application_credential_id: "{{ vault_openstack_app_cred_id }}"
+          application_credential_secret: "{{ vault_openstack_app_cred_secret }}"
         maintenance_openstack_snapshot_region_name: "GRA9"
 ```
 

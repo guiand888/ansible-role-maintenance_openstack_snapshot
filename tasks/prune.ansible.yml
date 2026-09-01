@@ -34,6 +34,7 @@
 - name: List all volume snapshots visible to this auth
   openstack.cloud.volume_snapshot_info:
     auth: "{{ maintenance_openstack_snapshot_auth }}"
+    auth_type: "{{ maintenance_openstack_snapshot_auth_type }}"
     region_name: "{{ maintenance_openstack_snapshot_region_name | default(omit) }}"
   delegate_to: localhost
   become: false
@@ -100,6 +101,7 @@
     volume: "{{ item.volume_id }}"
     state: absent
     auth: "{{ maintenance_openstack_snapshot_auth }}"
+    auth_type: "{{ maintenance_openstack_snapshot_auth_type }}"
     region_name: "{{ maintenance_openstack_snapshot_region_name | default(omit) }}"
   loop: "{{ maintenance_openstack_snapshot_expired }}"
   loop_control:

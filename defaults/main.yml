@@ -51,6 +51,26 @@ maintenance_openstack_snapshot_server: ""
 # group_vars/fwdv_infra/vault.yml).
 maintenance_openstack_snapshot_auth: {}
 
+# Which openstacksdk auth plugin the auth: dict above is shaped for.
+# Defaults to "password" — today's implicit behavior, kept as the default
+# for backward compatibility: every existing caller's auth: dict is
+# already password-shaped (auth_url, username, password, project_name,
+# domain names), and nothing before this variable existed ever selected a
+# plugin explicitly.
+#
+# Confirmed as a genuine, independent module parameter on
+# openstack.cloud.volume_snapshot (and this collection's other modules),
+# verified directly against the installed openstack.cloud 2.6.0 argspec —
+# it is NOT nested inside auth:, and it is not just a clouds.yaml concept.
+# Set this to "v3applicationcredential" to select OpenStack Application
+# Credential auth instead: pair it with an auth: dict containing
+# application_credential_id / application_credential_secret (plus
+# auth_url) instead of username/password — no project_name or domain
+# fields needed, since scoping is baked into the credential itself when
+# it's created in Horizon. An application credential is also individually
+# revocable without touching the account password, unlike password auth.
+maintenance_openstack_snapshot_auth_type: password
+
 # Optional — passed through to each module's region_name:. Leave empty for
 # a single-region cloud.
 maintenance_openstack_snapshot_region_name: ""

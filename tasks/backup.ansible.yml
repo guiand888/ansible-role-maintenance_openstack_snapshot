@@ -34,6 +34,7 @@
   openstack.cloud.server_info:
     name: "{{ maintenance_openstack_snapshot_server }}"
     auth: "{{ maintenance_openstack_snapshot_auth }}"
+    auth_type: "{{ maintenance_openstack_snapshot_auth_type }}"
     region_name: "{{ maintenance_openstack_snapshot_region_name | default(omit) }}"
   delegate_to: localhost
   become: false
@@ -126,6 +127,7 @@
     wait: "{{ maintenance_openstack_snapshot_wait }}"
     timeout: "{{ maintenance_openstack_snapshot_wait_timeout }}"
     auth: "{{ maintenance_openstack_snapshot_auth }}"
+    auth_type: "{{ maintenance_openstack_snapshot_auth_type }}"
     region_name: "{{ maintenance_openstack_snapshot_region_name | default(omit) }}"
   loop: "{{ maintenance_openstack_snapshot_target_volume_ids }}"
   loop_control:
